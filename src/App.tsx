@@ -1,7 +1,22 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx-js-style';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
+import { saveAs } from 'file-saver';
+import { 
+  Document, 
+  Packer, 
+  Paragraph, 
+  TextRun, 
+  Table, 
+  TableRow, 
+  TableCell, 
+  AlignmentType, 
+  WidthType, 
+  BorderStyle,
+  HeadingLevel,
+  VerticalAlign
+} from 'docx';
 import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, BarChart3, Download, Trash2, FileText, X, AlertTriangle, FileCheck, ArrowUpDown, ListOrdered } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -58,7 +73,35 @@ export default function App() {
   const [results, setResults] = useState<Record<string, SheetResult>>({});
   const [activeTab, setActiveTab] = useState<'upload' | 'dashboard' | 'results'>('upload');
   const [sortBy, setSortBy] = useState<'original' | 'votes'>('original');
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isInstalled, setIsInstalled] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+    if (window.matchMedia('(display-mode: standalone)').matches) {
+      setIsInstalled(true);
+    }
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
+      setDeferredPrompt(null);
+    }
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -136,9 +179,9 @@ export default function App() {
 
         if (isValidFile) {
           // Validate fileData
-          const attendances = Object.values(fileData).map((s: any) => s.attendance);
-          if (new Set(attendances).size > 1) {
-            validationError = 'عدد الحضور غير متطابق في جميع الفئات (يجب أن يكون ثابتاً)';
+          const activeAttendances = Object.values(fileData).map((s: any) => s.attendance).filter(a => a > 0);
+          if (new Set(activeAttendances).size > 1) {
+            validationError = 'عدد الحضور غير متطابق في الفئات النشطة (يجب أن يكون ثابتاً)';
           } else {
             for (const [sheetName, sheet] of Object.entries(fileData)) {
               const s = sheet as any;
@@ -192,6 +235,7 @@ export default function App() {
                 if (validationError) break;
 
               } else if (sheetName.includes('نقيب فرعي')) {
+                if (s.attendance === 0) continue;
                 const actualCandidates = candidatesArray.filter(c => {
                   const isHeader = c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب') || c.name.includes('مقعد'));
                   return !isHeader;
@@ -298,6 +342,46 @@ export default function App() {
       setResults({});
       setActiveTab('upload');
     }
+  };
+
+  const getHighlights = (sheetName: string, candidatesArray: any[]) => {
+    const highlights = new Set<string>();
+    
+    if (sheetName.includes('نقيب عام') || sheetName.includes('نقيب فرعي')) {
+      const actual = candidatesArray.filter(c => c.votes > 0).sort((a, b) => b.votes - a.votes);
+      if (actual.length > 0) highlights.add(actual[0].name);
+    } else if (sheetName.includes('مكملين')) {
+      let currentDiv = '';
+      let divCandidates: any[] = [];
+      
+      const originalOrder = [...candidatesArray].sort((a, b) => a.originalIndex - b.originalIndex);
+      
+      const processDiv = (divName: string, candidates: any[]) => {
+        if (!divName) return;
+        const sorted = candidates.sort((a, b) => b.votes - a.votes);
+        if (sorted.length === 0) return;
+        
+        if (divName.includes('كهرباء') || divName.includes('مدني') || divName.includes('ميكانيكا') || divName.includes('عمارة')) {
+          sorted.slice(0, 2).forEach(c => highlights.add(c.name));
+        } else if (divName.includes('كيمياء') || divName.includes('غزل') || divName.includes('بترول') || divName.includes('تعدين') || divName.includes('فلزات')) {
+          highlights.add(sorted[0].name);
+        }
+      };
+
+      for (const c of originalOrder) {
+        const isHeader = c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب'));
+        if (isHeader) {
+          processDiv(currentDiv, divCandidates);
+          currentDiv = c.name;
+          divCandidates = [];
+        } else if (c.votes > 0) {
+          divCandidates.push(c);
+        }
+      }
+      processDiv(currentDiv, divCandidates);
+    }
+    
+    return highlights;
   };
 
   const exportToExcel = () => {
@@ -417,7 +501,25 @@ export default function App() {
         }
       };
 
+      const highlightStyle = {
+        font: { bold: true, color: { rgb: "FFFFFF" } },
+        fill: { fgColor: { rgb: "F59E0B" } }, // Amber-500
+        alignment: { horizontal: "right", vertical: "center" },
+        border: {
+          top: { style: "thin", color: { rgb: "D97706" } },
+          bottom: { style: "thin", color: { rgb: "D97706" } },
+          left: { style: "thin", color: { rgb: "D97706" } },
+          right: { style: "thin", color: { rgb: "D97706" } }
+        }
+      };
+
+      const highlightNumberStyle = {
+        ...highlightStyle,
+        alignment: { horizontal: "center", vertical: "center" }
+      };
+
       const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:B1');
+      const highlights = getHighlights(sheetName, candidatesArray);
       
       for (let R = range.s.r; R <= range.e.r; ++R) {
         for (let C = range.s.c; C <= range.e.c; ++C) {
@@ -436,11 +538,14 @@ export default function App() {
             const rowData = data[R - 1]; // -1 because of header
             const isDivisionHeader = rowData['العدد'] === 0 && (rowData['البيان'].includes('شعبة') || rowData['البيان'].includes('مطلوب') || rowData['البيان'].includes('منصب'));
             const isSubCategoryHeader = rowData['العدد'] === 0 && rowData['البيان'].includes('مقعد');
+            const isHighlighted = highlights.has(rowData['البيان']);
             
             if (isDivisionHeader) {
               ws[cellRef].s = divisionHeaderStyle;
             } else if (isSubCategoryHeader) {
               ws[cellRef].s = subCategoryHeaderStyle;
+            } else if (isHighlighted) {
+              ws[cellRef].s = C === 0 ? highlightStyle : highlightNumberStyle;
             } else {
               ws[cellRef].s = C === 0 ? cellStyle : numberStyle;
             }
@@ -508,6 +613,8 @@ export default function App() {
         originalIndex: data.originalIndex
       }));
 
+      const highlights = getHighlights(sheetName, candidatesArray);
+
       if (sortBy === 'votes') {
         candidatesArray.sort((a, b) => b.votes - a.votes);
       } else {
@@ -517,12 +624,23 @@ export default function App() {
       const totalVotes = sheetData.valid > 0 ? sheetData.valid : candidatesArray.reduce((sum, c) => sum + c.votes, 0);
       
       const tableData = candidatesArray.map((c, idx) => {
+        const isHighlighted = highlights.has(c.name);
+        
         if (c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب'))) {
           return [{ content: c.name, colSpan: 3, styles: { halign: 'center', fontStyle: 'bold', fillColor: [226, 232, 240], textColor: [15, 23, 42] } }];
         }
         if (c.votes === 0 && c.name.includes('مقعد')) {
           return [{ content: c.name, colSpan: 3, styles: { halign: 'center', fontStyle: 'bold', fillColor: [239, 246, 255], textColor: [30, 64, 175] } }];
         }
+        
+        if (isHighlighted) {
+          return [
+            { content: (idx + 1).toString(), styles: { fillColor: [245, 158, 11], textColor: [255, 255, 255], fontStyle: 'bold' } },
+            { content: c.name, styles: { fillColor: [245, 158, 11], textColor: [255, 255, 255], fontStyle: 'bold' } },
+            { content: c.votes.toString(), styles: { fillColor: [245, 158, 11], textColor: [255, 255, 255], fontStyle: 'bold' } }
+          ];
+        }
+        
         return [(idx + 1).toString(), c.name, c.votes.toString()];
       });
       
@@ -546,6 +664,143 @@ export default function App() {
     doc.save('النتائج_النهائية.pdf');
   };
 
+  const exportToDocx = async () => {
+    const sections = Object.keys(results).map((sheetName) => {
+      const sheetData = results[sheetName];
+      const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]: [string, any]) => ({
+        name,
+        votes: data.votes,
+        originalIndex: data.originalIndex
+      }));
+
+      const highlights = getHighlights(sheetName, candidatesArray);
+
+      if (sortBy === 'votes') {
+        candidatesArray.sort((a, b) => b.votes - a.votes);
+      } else {
+        candidatesArray.sort((a, b) => a.originalIndex - b.originalIndex);
+      }
+
+      const summaryTable = new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({ children: [new Paragraph({ text: "إجمالي الحضور", alignment: AlignmentType.RIGHT })], verticalAlign: VerticalAlign.CENTER }),
+              new TableCell({ children: [new Paragraph({ text: sheetData.attendance.toString(), alignment: AlignmentType.CENTER })], verticalAlign: VerticalAlign.CENTER }),
+            ],
+          }),
+          new TableRow({
+            children: [
+              new TableCell({ children: [new Paragraph({ text: "الأصوات الصحيحة", alignment: AlignmentType.RIGHT })], verticalAlign: VerticalAlign.CENTER }),
+              new TableCell({ children: [new Paragraph({ text: sheetData.valid.toString(), alignment: AlignmentType.CENTER })], verticalAlign: VerticalAlign.CENTER }),
+            ],
+          }),
+          new TableRow({
+            children: [
+              new TableCell({ children: [new Paragraph({ text: "الأصوات الباطلة", alignment: AlignmentType.RIGHT })], verticalAlign: VerticalAlign.CENTER }),
+              new TableCell({ children: [new Paragraph({ text: sheetData.invalid.toString(), alignment: AlignmentType.CENTER })], verticalAlign: VerticalAlign.CENTER }),
+            ],
+          }),
+        ],
+      });
+
+      const candidatesRows = candidatesArray.map((c, idx) => {
+        const isHeader = c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب') || c.name.includes('مقعد'));
+        const isHighlighted = highlights.has(c.name);
+        
+        if (isHeader) {
+          return new TableRow({
+            children: [
+              new TableCell({
+                children: [new Paragraph({ text: c.name, alignment: AlignmentType.CENTER, style: "HeaderStyle" })],
+                columnSpan: 3,
+                shading: { fill: "E2E8F0" },
+              }),
+            ],
+          });
+        }
+
+        return new TableRow({
+          children: [
+            new TableCell({ 
+              children: [new Paragraph({ text: (idx + 1).toString(), alignment: AlignmentType.CENTER })],
+              shading: isHighlighted ? { fill: "F59E0B" } : undefined
+            }),
+            new TableCell({ 
+              children: [new Paragraph({ text: c.name, alignment: AlignmentType.RIGHT })],
+              shading: isHighlighted ? { fill: "F59E0B" } : undefined
+            }),
+            new TableCell({ 
+              children: [new Paragraph({ text: c.votes.toString(), alignment: AlignmentType.CENTER })],
+              shading: isHighlighted ? { fill: "F59E0B" } : undefined
+            }),
+          ],
+        });
+      });
+
+      const candidatesTable = new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({ children: [new Paragraph({ text: "#", alignment: AlignmentType.CENTER })], shading: { fill: "1E3A8A" } }),
+              new TableCell({ children: [new Paragraph({ text: "اسم المرشح", alignment: AlignmentType.RIGHT })], shading: { fill: "1E3A8A" } }),
+              new TableCell({ children: [new Paragraph({ text: "الأصوات", alignment: AlignmentType.CENTER })], shading: { fill: "1E3A8A" } }),
+            ],
+          }),
+          ...candidatesRows,
+        ],
+      });
+
+      return {
+        properties: {
+          page: {
+            margin: {
+              top: 720,
+              right: 720,
+              bottom: 720,
+              left: 720,
+            },
+          },
+        },
+        children: [
+          new Paragraph({
+            text: `الفئة: ${sheetName}`,
+            heading: HeadingLevel.HEADING_1,
+            alignment: AlignmentType.RIGHT,
+            spacing: { before: 400, after: 200 },
+          }),
+          new Paragraph({ text: "ملخص الأصوات:", alignment: AlignmentType.RIGHT, spacing: { after: 100 } }),
+          summaryTable,
+          new Paragraph({ text: "", spacing: { before: 200 } }),
+          new Paragraph({ text: "تفاصيل المرشحين:", alignment: AlignmentType.RIGHT, spacing: { after: 100 } }),
+          candidatesTable,
+          new Paragraph({ text: "", spacing: { before: 400 }, pageBreakBefore: true }),
+        ],
+      };
+    });
+
+    const doc = new Document({
+      sections: sections,
+      styles: {
+        paragraphStyles: [
+          {
+            id: "HeaderStyle",
+            name: "Header Style",
+            run: {
+              bold: true,
+              size: 24,
+            },
+          },
+        ],
+      },
+    });
+
+    const blob = await Packer.toBlob(doc);
+    saveAs(blob, "النتائج_النهائية.docx");
+  };
+
   const successfulFiles = files.filter(f => f.status === 'success');
   const errorFiles = files.filter(f => f.status === 'error');
   
@@ -558,15 +813,14 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-200" dir="rtl">
       <header className="bg-gradient-to-r from-slate-900 via-blue-900 to-slate-900 text-white shadow-xl sticky top-0 z-50 border-b border-blue-800/50">
-        <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10 mix-blend-overlay"></div>
         <div className="container mx-auto px-4 py-5 flex flex-col md:flex-row items-center justify-between gap-5 relative z-10">
           <div className="flex items-center gap-4">
             <div className="bg-white/10 p-2 rounded-2xl shadow-inner border border-white/20 backdrop-blur-sm overflow-hidden">
-              <img src="https://general-committee-eng-dtunit-apa.netlify.app/logo.jpg" alt="Logo" className="w-10 h-10 object-cover rounded-xl" referrerPolicy="no-referrer" />
+              <BarChart3 className="w-10 h-10 text-blue-200" />
             </div>
             <div>
               <p className="text-blue-200/90 text-xs font-bold mb-1 tracking-wide">
-                اللجنة القضائية العليا - النيابة الادارية
+                نظام يعمل أوفلاين بالكامل - PWA
               </p>
               <h1 className="text-2xl md:text-3xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-l from-white to-blue-200">
                 تجميع نتائج اللجان العامة
@@ -600,6 +854,15 @@ export default function App() {
             </button>
           </div>
           <div className="flex items-center gap-3">
+            {deferredPrompt && !isInstalled && (
+              <button 
+                onClick={handleInstallClick}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2.5 rounded-xl transition-all text-sm font-bold flex items-center gap-2 shadow-lg hover:shadow-emerald-500/40"
+              >
+                <Download className="w-4 h-4" />
+                تثبيت البرنامج
+              </button>
+            )}
             <button 
               onClick={resetDatabase}
               className="bg-red-500/20 hover:bg-red-500 text-red-200 hover:text-white px-4 py-2.5 rounded-xl border border-red-500/30 transition-all text-sm font-bold flex items-center gap-2 shadow-lg hover:shadow-red-500/40 group"
@@ -829,6 +1092,14 @@ export default function App() {
                   <FileText className="w-4 h-4" />
                   PDF
                 </button>
+                <button 
+                  onClick={exportToDocx}
+                  disabled={Object.keys(results).length === 0}
+                  className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow"
+                >
+                  <FileText className="w-4 h-4" />
+                  Word
+                </button>
               </div>
             </div>
 
@@ -856,6 +1127,8 @@ export default function App() {
                     votes: data.votes,
                     originalIndex: data.originalIndex
                   }));
+
+                  const highlights = getHighlights(sheetName, candidatesArray);
 
                   if (sortBy === 'votes') {
                     candidatesArray.sort((a, b) => b.votes - a.votes);
@@ -902,6 +1175,7 @@ export default function App() {
                               // Check if it's a division/section header (no votes, or specific naming pattern)
                               const isDivisionHeader = c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب'));
                               const isSubCategoryHeader = c.votes === 0 && c.name.includes('مقعد');
+                              const isHighlighted = highlights.has(c.name);
                               
                               if (isDivisionHeader) {
                                 return (
@@ -924,10 +1198,14 @@ export default function App() {
                               }
 
                               return (
-                                <tr key={c.name} className="hover:bg-blue-50/50 transition-colors group">
+                                <tr key={c.name} className={cn(
+                                  "transition-colors group",
+                                  isHighlighted ? "bg-amber-50 hover:bg-amber-100/80" : "hover:bg-blue-50/50"
+                                )}>
                                   <td className="p-4 text-center">
                                     <span className={cn(
                                       "inline-flex items-center justify-center w-8 h-8 rounded-full font-bold text-sm shadow-sm border",
+                                      isHighlighted ? "bg-amber-500 text-white border-amber-600" :
                                       sortBy === 'votes' && idx === 0 ? "bg-amber-100 text-amber-700 border-amber-200" : 
                                       sortBy === 'votes' && idx === 1 ? "bg-slate-200 text-slate-700 border-slate-300" :
                                       sortBy === 'votes' && idx === 2 ? "bg-orange-100 text-orange-800 border-orange-200" :
@@ -936,9 +1214,22 @@ export default function App() {
                                       {idx + 1}
                                     </span>
                                   </td>
-                                  <td className="p-4 font-bold text-slate-800 text-lg">{c.name}</td>
+                                  <td className={cn(
+                                    "p-4 font-bold text-lg",
+                                    isHighlighted ? "text-amber-900" : "text-slate-800"
+                                  )}>
+                                    {c.name}
+                                    {isHighlighted && (
+                                      <span className="mr-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                                        الأعلى أصواتاً
+                                      </span>
+                                    )}
+                                  </td>
                                   <td className="p-4 text-center">
-                                    <span className="font-black text-blue-700 text-lg bg-blue-50 px-3 py-1 rounded-lg border border-blue-100">{c.votes.toLocaleString()}</span>
+                                    <span className={cn(
+                                      "font-black text-lg px-3 py-1 rounded-lg border",
+                                      isHighlighted ? "bg-amber-500 text-white border-amber-600" : "bg-blue-50 text-blue-700 border-blue-100"
+                                    )}>{c.votes.toLocaleString()}</span>
                                   </td>
                                 </tr>
                               );
