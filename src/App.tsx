@@ -62,7 +62,7 @@ export default function App() {
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const newFiles = Array.from(e.target.files);
+      const newFiles = Array.from(e.target.files) as File[];
       processFiles(newFiles);
     }
   };
@@ -104,9 +104,6 @@ export default function App() {
                sheetName = `نقيب فرعي - ${syndicateName}`;
              }
 
-             if (!newResults[sheetName]) {
-               newResults[sheetName] = { attendance: 0, valid: 0, invalid: 0, candidates: {} };
-             }
              if (!fileData[sheetName]) {
                fileData[sheetName] = { attendance: 0, valid: 0, invalid: 0, candidates: {} };
              }
@@ -119,20 +116,12 @@ export default function App() {
                   const nameStr = candidateName.trim();
                   
                   if (nameStr.includes('إجمالي الحضور') || nameStr.includes('اجمالي الحضور') || nameStr === 'الحضور' || nameStr === 'إجمالي' || nameStr === 'اجمالي') {
-                    newResults[sheetName].attendance += votes;
                     fileData[sheetName].attendance += votes;
                   } else if (nameStr.includes('الأصوات الصحيحة') || nameStr.includes('الاصوات الصحيحة') || nameStr === 'الصحيح' || nameStr === 'صحيح') {
-                    newResults[sheetName].valid += votes;
                     fileData[sheetName].valid += votes;
                   } else if (nameStr.includes('الأصوات الباطلة') || nameStr.includes('الاصوات الباطلة') || nameStr === 'الباطل' || nameStr === 'باطل') {
-                    newResults[sheetName].invalid += votes;
                     fileData[sheetName].invalid += votes;
                   } else {
-                    if (!newResults[sheetName].candidates[nameStr]) {
-                      newResults[sheetName].candidates[nameStr] = { votes: 0, originalIndex: index };
-                    }
-                    newResults[sheetName].candidates[nameStr].votes += votes;
-                    
                     if (!fileData[sheetName].candidates[nameStr]) {
                       fileData[sheetName].candidates[nameStr] = { votes: 0, originalIndex: index };
                     }
@@ -143,7 +132,107 @@ export default function App() {
           }
         });
 
+        let validationError: string | null = null;
+
         if (isValidFile) {
+          // Validate fileData
+          const attendances = Object.values(fileData).map((s: any) => s.attendance);
+          if (new Set(attendances).size > 1) {
+            validationError = 'عدد الحضور غير متطابق في جميع الفئات (يجب أن يكون ثابتاً)';
+          } else {
+            for (const [sheetName, sheet] of Object.entries(fileData)) {
+              const s = sheet as any;
+              
+              if (s.valid + s.invalid !== s.attendance) {
+                validationError = `في فئة "${sheetName}": مجموع الأصوات الصحيحة والباطلة (${s.valid + s.invalid}) لا يساوي إجمالي الحضور (${s.attendance})`;
+                break;
+              }
+
+              const candidatesArray = Object.entries(s.candidates)
+                .map(([name, data]: [string, any]) => ({ name, votes: data.votes, originalIndex: data.originalIndex }))
+                .sort((a, b) => a.originalIndex - b.originalIndex);
+
+              if (sheetName.includes('نقيب عام')) {
+                const totalVotes = candidatesArray.reduce((sum, c) => sum + c.votes, 0);
+                if (totalVotes !== s.valid) {
+                  validationError = `في فئة "${sheetName}": إجمالي أصوات المرشحين (${totalVotes}) لا يساوي عدد الأصوات الصحيحة (${s.valid})`;
+                  break;
+                }
+              } else if (sheetName.includes('مكملين')) {
+                const divisionSums: Record<string, number> = {};
+                let currentDiv = '';
+
+                for (const c of candidatesArray) {
+                  const isDivisionHeader = c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب'));
+                  const isSubCategoryHeader = c.votes === 0 && c.name.includes('مقعد');
+
+                  if (isDivisionHeader) {
+                    currentDiv = c.name;
+                    divisionSums[currentDiv] = 0;
+                  } else if (!isSubCategoryHeader) {
+                    if (currentDiv) {
+                      divisionSums[currentDiv] = (divisionSums[currentDiv] || 0) + c.votes;
+                    }
+                  }
+                }
+
+                for (const [div, sum] of Object.entries(divisionSums)) {
+                  if (div.includes('كهرباء') || div.includes('مدني') || div.includes('ميكانيكا') || div.includes('عمارة')) {
+                    if (sum !== 2 * s.valid) {
+                      validationError = `في فئة "${sheetName}" (${div}): إجمالي أصوات المرشحين (${sum}) يجب أن يكون ضعف الأصوات الصحيحة (${2 * s.valid})`;
+                      break;
+                    }
+                  } else if (div.includes('كيمياء') || div.includes('غزل') || div.includes('بترول') || div.includes('تعدين') || div.includes('فلزات')) {
+                    if (sum !== s.valid) {
+                      validationError = `في فئة "${sheetName}" (${div}): إجمالي أصوات المرشحين (${sum}) يجب أن يساوي الأصوات الصحيحة (${s.valid})`;
+                      break;
+                    }
+                  }
+                }
+                if (validationError) break;
+
+              } else if (sheetName.includes('نقيب فرعي')) {
+                const actualCandidates = candidatesArray.filter(c => {
+                  const isHeader = c.votes === 0 && (c.name.includes('شعبة') || c.name.includes('مطلوب') || c.name.includes('منصب') || c.name.includes('مقعد'));
+                  return !isHeader;
+                });
+                
+                if (actualCandidates.length > 0) {
+                  if (actualCandidates.length !== 2) {
+                    validationError = `في فئة "${sheetName}": يجب أن يكون عدد المرشحين 2 فقط، ولكن وجد ${actualCandidates.length}`;
+                    break;
+                  }
+                  const totalVotes = actualCandidates.reduce((sum, c) => sum + c.votes, 0);
+                  if (totalVotes !== s.valid) {
+                    validationError = `في فئة "${sheetName}": إجمالي أصوات المرشحين (${totalVotes}) لا يساوي عدد الأصوات الصحيحة (${s.valid})`;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (isValidFile && !validationError) {
+          // Merge fileData into newResults
+          for (const [sheetName, sheet] of Object.entries(fileData)) {
+            const s = sheet as any;
+            if (!newResults[sheetName]) {
+              newResults[sheetName] = { attendance: 0, valid: 0, invalid: 0, candidates: {} };
+            }
+            newResults[sheetName].attendance += s.attendance;
+            newResults[sheetName].valid += s.valid;
+            newResults[sheetName].invalid += s.invalid;
+            
+            for (const [name, data] of Object.entries(s.candidates)) {
+              const cData = data as any;
+              if (!newResults[sheetName].candidates[name]) {
+                newResults[sheetName].candidates[name] = { votes: 0, originalIndex: cData.originalIndex };
+              }
+              newResults[sheetName].candidates[name].votes += cData.votes;
+            }
+          }
+
           updatedFiles.push({
             name: file.name,
             size: file.size,
@@ -156,7 +245,7 @@ export default function App() {
             name: file.name,
             size: file.size,
             status: 'error',
-            errorMsg: 'الملف لا يحتوي على بيانات صحيحة أو أوراق عمل صالحة'
+            errorMsg: validationError || 'الملف لا يحتوي على بيانات صحيحة أو أوراق عمل صالحة'
           });
         }
 
@@ -203,10 +292,11 @@ export default function App() {
     setFiles(files.filter((_, idx) => idx !== indexToRemove));
   };
 
-  const clearData = () => {
-    if (window.confirm('هل أنت متأكد من مسح جميع البيانات؟')) {
+  const resetDatabase = () => {
+    if (window.confirm('هل أنت متأكد من رغبتك في تصفير قاعدة البيانات؟ سيتم حذف جميع الملفات والنتائج بشكل نهائي.')) {
       setFiles([]);
       setResults({});
+      setActiveTab('upload');
     }
   };
 
@@ -223,7 +313,7 @@ export default function App() {
         { 'البيان': '', 'العدد': null }
       ];
 
-      const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]) => ({
+      const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]: [string, any]) => ({
         name,
         votes: data.votes,
         originalIndex: data.originalIndex
@@ -412,7 +502,7 @@ export default function App() {
 
       yPos = (doc as any).lastAutoTable.finalY + 10;
 
-      const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]) => ({
+      const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]: [string, any]) => ({
         name,
         votes: data.votes,
         originalIndex: data.originalIndex
@@ -509,6 +599,16 @@ export default function App() {
               النتائج النهائية
             </button>
           </div>
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={resetDatabase}
+              className="bg-red-500/20 hover:bg-red-500 text-red-200 hover:text-white px-4 py-2.5 rounded-xl border border-red-500/30 transition-all text-sm font-bold flex items-center gap-2 shadow-lg hover:shadow-red-500/40 group"
+              title="تصفير قاعدة البيانات"
+            >
+              <Trash2 className="w-4 h-4 group-hover:animate-bounce" />
+              تصفير البيانات
+            </button>
+          </div>
         </div>
       </header>
 
@@ -548,9 +648,9 @@ export default function App() {
                     </div>
                     الملفات المعالجة ({files.length})
                   </h3>
-                  <button onClick={clearData} className="text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-4 py-2 rounded-xl transition-colors text-sm flex items-center gap-2 font-bold border border-transparent hover:border-rose-200">
+                  <button onClick={resetDatabase} className="text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-4 py-2 rounded-xl transition-colors text-sm flex items-center gap-2 font-bold border border-transparent hover:border-rose-200">
                     <Trash2 className="w-4 h-4" />
-                    مسح الكل
+                    تصفير البيانات
                   </button>
                 </div>
                 <div className="p-6">
@@ -751,7 +851,7 @@ export default function App() {
                 {Object.keys(results).map(sheetName => {
                   const sheetData = results[sheetName];
                   
-                  const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]) => ({
+                  const candidatesArray = Object.entries(sheetData.candidates).map(([name, data]: [string, any]) => ({
                     name,
                     votes: data.votes,
                     originalIndex: data.originalIndex
